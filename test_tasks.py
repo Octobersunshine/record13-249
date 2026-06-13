@@ -260,15 +260,17 @@ class TestTaskManager(unittest.TestCase):
 
     def test_claim_reward(self):
         self.manager.login("user1")
-        success = self.manager.claim_reward("user1", TaskType.LOGIN)
+        success, reward = self.manager.claim_reward("user1", TaskType.LOGIN)
         self.assertTrue(success)
+        self.assertIn("金币", reward)
 
-        success = self.manager.claim_reward("user1", TaskType.LOGIN)
+        success, reward = self.manager.claim_reward("user1", TaskType.LOGIN)
         self.assertFalse(success)
 
     def test_claim_reward_not_completed(self):
-        success = self.manager.claim_reward("user1", TaskType.KILL)
+        success, reward = self.manager.claim_reward("user1", TaskType.KILL)
         self.assertFalse(success)
+        self.assertEqual(reward, "")
 
     def test_force_reset_all(self):
         self.manager.login("u1")
@@ -705,6 +707,436 @@ class TestTimezoneScheduler(unittest.TestCase):
         finally:
             if os.path.exists(temp_path):
                 os.unlink(temp_path)
+
+
+class TestStreakModels(unittest.TestCase):
+    def test_streak_first_completion(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        self.assertEqual(task.streak_days, 0)
+        self.assertIsNone(task.last_completed_date)
+
+        task.update_progress(1)
+        self.assertTrue(task.completed)
+        self.assertEqual(task.streak_days, 1)
+        self.assertEqual(task.last_completed_date, date.today())
+
+    def test_streak_consecutive_day_increments(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 1
+        task.last_completed_date = date.today() - timedelta(days=1)
+
+        task.update_progress(1)
+        self.assertEqual(task.streak_days, 2)
+
+    def test_streak_three_consecutive_days(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 2
+        task.last_completed_date = date.today() - timedelta(days=1)
+
+        task.update_progress(1)
+        self.assertEqual(task.streak_days, 3)
+
+    def test_streak_same_day_no_double_count(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.update_progress(1)
+        self.assertEqual(task.streak_days, 1)
+
+        task.completed = False
+        task.progress = 0
+        task.update_progress(1)
+        self.assertEqual(task.streak_days, 1)
+
+    def test_streak_broken_resets_to_one(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 5
+        task.last_completed_date = date.today() - timedelta(days=2)
+
+        task.update_progress(1)
+        self.assertEqual(task.streak_days, 1)
+
+    def test_streak_none_last_completed(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 0
+        task.last_completed_date = None
+
+        task.update_progress(1)
+        self.assertEqual(task.streak_days, 1)
+
+    def test_reset_streak_if_broken_missed_day(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 3
+        task.last_completed_date = date.today() - timedelta(days=2)
+        task.reset_date = date.today() - timedelta(days=1)
+
+        task._reset_streak_if_broken()
+        self.assertEqual(task.streak_days, 0)
+
+    def test_reset_streak_preserved_if_completed_yesterday(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 3
+        task.last_completed_date = date.today() - timedelta(days=1)
+        task.reset_date = date.today() - timedelta(days=1)
+
+        task._reset_streak_if_broken()
+        self.assertEqual(task.streak_days, 3)
+
+    def test_reset_streak_not_broken_same_day(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 3
+        task.last_completed_date = date.today()
+        task.reset_date = date.today() - timedelta(days=1)
+
+        task._reset_streak_if_broken()
+        self.assertEqual(task.streak_days, 3)
+
+    def test_reset_streak_none_last_completed_no_op(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 0
+        task.last_completed_date = None
+        task.reset_date = date.today() - timedelta(days=1)
+
+        task._reset_streak_if_broken()
+        self.assertEqual(task.streak_days, 0)
+
+    def test_reset_calls_reset_streak_if_broken(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 5
+        task.last_completed_date = date.today() - timedelta(days=2)
+        task.reset_date = date.today() - timedelta(days=1)
+        task.completed = True
+        task.claimed = True
+        task.progress = 1
+
+        task.reset()
+        self.assertEqual(task.streak_days, 0)
+        self.assertEqual(task.progress, 0)
+        self.assertFalse(task.completed)
+        self.assertFalse(task.claimed)
+
+    def test_streak_preserved_across_same_day_reset(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN)
+        task.streak_days = 3
+        task.last_completed_date = date.today() - timedelta(days=1)
+        task.reset_date = date.today()
+        task.completed = True
+
+        task.reset()
+        self.assertEqual(task.streak_days, 3)
+
+    def test_streak_serialization(self):
+        task = DailyTask(
+            user_id="u1",
+            task_type=TaskType.LOGIN,
+            streak_days=5,
+            last_completed_date=date(2026, 6, 12),
+            timezone="Asia/Shanghai",
+        )
+        data = task.to_dict()
+        self.assertEqual(data["streak_days"], 5)
+        self.assertEqual(data["last_completed_date"], "2026-06-12")
+
+        restored = DailyTask.from_dict(data)
+        self.assertEqual(restored.streak_days, 5)
+        self.assertEqual(restored.last_completed_date, date(2026, 6, 12))
+
+    def test_streak_serialization_none_last_completed(self):
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN, streak_days=0)
+        data = task.to_dict()
+        self.assertIsNone(data["last_completed_date"])
+
+        restored = DailyTask.from_dict(data)
+        self.assertEqual(restored.streak_days, 0)
+        self.assertIsNone(restored.last_completed_date)
+
+    def test_streak_deserialization_missing_fields(self):
+        data = {
+            "user_id": "u1",
+            "task_type": "login",
+            "progress": 0,
+            "target": 1,
+        }
+        task = DailyTask.from_dict(data)
+        self.assertEqual(task.streak_days, 0)
+        self.assertIsNone(task.last_completed_date)
+
+
+class TestRewardTiers(unittest.TestCase):
+    def test_get_reward_for_streak_day1(self):
+        config = TaskConfig(
+            task_type=TaskType.LOGIN,
+            name="每日登录",
+            target=1,
+            reward="100金币",
+            reward_tiers={1: "100金币", 3: "300金币", 7: "800金币"},
+        )
+        self.assertEqual(config.get_reward_for_streak(1), "100金币")
+
+    def test_get_reward_for_streak_day2(self):
+        config = TaskConfig(
+            task_type=TaskType.LOGIN,
+            name="每日登录",
+            target=1,
+            reward="100金币",
+            reward_tiers={1: "100金币", 3: "300金币", 7: "800金币"},
+        )
+        self.assertEqual(config.get_reward_for_streak(2), "100金币")
+
+    def test_get_reward_for_streak_day3(self):
+        config = TaskConfig(
+            task_type=TaskType.LOGIN,
+            name="每日登录",
+            target=1,
+            reward="100金币",
+            reward_tiers={1: "100金币", 3: "300金币", 7: "800金币"},
+        )
+        self.assertEqual(config.get_reward_for_streak(3), "300金币")
+
+    def test_get_reward_for_streak_day7(self):
+        config = TaskConfig(
+            task_type=TaskType.LOGIN,
+            name="每日登录",
+            target=1,
+            reward="100金币",
+            reward_tiers={1: "100金币", 3: "300金币", 7: "800金币"},
+        )
+        self.assertEqual(config.get_reward_for_streak(7), "800金币")
+
+    def test_get_reward_for_streak_day10_capped(self):
+        config = TaskConfig(
+            task_type=TaskType.LOGIN,
+            name="每日登录",
+            target=1,
+            reward="100金币",
+            reward_tiers={1: "100金币", 3: "300金币", 7: "800金币"},
+            max_streak_days=7,
+        )
+        self.assertEqual(config.get_reward_for_streak(10), "800金币")
+
+    def test_get_reward_for_streak_zero_returns_base(self):
+        config = TaskConfig(
+            task_type=TaskType.LOGIN,
+            name="每日登录",
+            target=1,
+            reward="100金币",
+            reward_tiers={1: "100金币", 3: "300金币", 7: "800金币"},
+        )
+        self.assertEqual(config.get_reward_for_streak(0), "100金币")
+
+    def test_get_reward_no_tiers_returns_base(self):
+        config = TaskConfig(
+            task_type=TaskType.LOGIN,
+            name="每日登录",
+            target=1,
+            reward="100金币",
+        )
+        self.assertEqual(config.get_reward_for_streak(5), "100金币")
+
+    def test_task_get_current_reward(self):
+        config = TaskConfig(
+            task_type=TaskType.LOGIN,
+            name="每日登录",
+            target=1,
+            reward="100金币",
+            reward_tiers={1: "100金币", 3: "300金币", 7: "800金币"},
+        )
+        task = DailyTask(user_id="u1", task_type=TaskType.LOGIN, streak_days=3)
+        self.assertEqual(task.get_current_reward(config), "300金币")
+
+    def test_default_reward_tiers_login(self):
+        from models import DEFAULT_REWARD_TIERS
+        self.assertEqual(DEFAULT_REWARD_TIERS[TaskType.LOGIN][1], "100金币")
+        self.assertEqual(DEFAULT_REWARD_TIERS[TaskType.LOGIN][7], "800金币 + 稀有道具")
+
+    def test_default_reward_tiers_kill(self):
+        from models import DEFAULT_REWARD_TIERS
+        self.assertEqual(DEFAULT_REWARD_TIERS[TaskType.KILL][3], "1500经验")
+
+    def test_default_reward_tiers_recharge(self):
+        from models import DEFAULT_REWARD_TIERS
+        self.assertEqual(DEFAULT_REWARD_TIERS[TaskType.RECHARGE][7], "VIP经验x80 + 专属称号")
+
+
+class TestStreakManager(unittest.TestCase):
+    def setUp(self):
+        self.temp_fd, self.temp_path = tempfile.mkstemp(suffix=".json")
+        os.close(self.temp_fd)
+        self.manager = TaskManager(data_file=self.temp_path)
+
+    def tearDown(self):
+        if os.path.exists(self.temp_path):
+            os.unlink(self.temp_path)
+
+    def test_get_streak_days(self):
+        self.manager.login("u1")
+        streak = self.manager.get_streak_days("u1", TaskType.LOGIN)
+        self.assertEqual(streak, 1)
+
+    def test_get_streak_days_no_task(self):
+        streak = self.manager.get_streak_days("nonexistent", TaskType.LOGIN)
+        self.assertEqual(streak, 0)
+
+    def test_get_current_reward(self):
+        self.manager.login("u1")
+        reward = self.manager.get_current_reward("u1", TaskType.LOGIN)
+        self.assertEqual(reward, "100金币")
+
+    def test_claim_reward_returns_streak_reward(self):
+        task = self.manager.login("u1")
+        task.streak_days = 7
+        task.last_completed_date = date.today() - timedelta(days=1)
+        self.manager._save()
+
+        success, reward = self.manager.claim_reward("u1", TaskType.LOGIN)
+        self.assertTrue(success)
+        self.assertEqual(reward, "800金币 + 稀有道具")
+
+    def test_claim_reward_uses_streak_for_kill(self):
+        self.manager.kill_monsters("u1", 50)
+        task = self.manager.get_task("u1", TaskType.KILL)
+        task.streak_days = 3
+        task.last_completed_date = date.today() - timedelta(days=1)
+        self.manager._save()
+
+        success, reward = self.manager.claim_reward("u1", TaskType.KILL)
+        self.assertTrue(success)
+        self.assertEqual(reward, "1500经验")
+
+    def test_reset_streak_manual(self):
+        self.manager.login("u1")
+        task = self.manager.get_task("u1", TaskType.LOGIN)
+        self.assertEqual(task.streak_days, 1)
+
+        self.manager.reset_streak("u1", TaskType.LOGIN)
+        task = self.manager.get_task("u1", TaskType.LOGIN)
+        self.assertEqual(task.streak_days, 0)
+        self.assertIsNone(task.last_completed_date)
+
+    def test_streak_persistence(self):
+        self.manager.login("u1")
+        task = self.manager.get_task("u1", TaskType.LOGIN)
+        task.streak_days = 5
+        task.last_completed_date = date.today() - timedelta(days=1)
+        self.manager._save()
+
+        manager2 = TaskManager(data_file=self.temp_path)
+        streak = manager2.get_streak_days("u1", TaskType.LOGIN)
+        self.assertEqual(streak, 5)
+
+    def test_streak_increment_across_days(self):
+        self.manager.login("u1")
+        task = self.manager.get_task("u1", TaskType.LOGIN)
+        self.assertEqual(task.streak_days, 1)
+
+        task.reset_date = date.today() - timedelta(days=1)
+        task.last_completed_date = date.today() - timedelta(days=1)
+        self.manager._save()
+
+        task2 = self.manager.login("u1")
+        self.assertEqual(task2.streak_days, 2)
+
+    def test_streak_broken_after_missing_day(self):
+        self.manager.login("u1")
+        task = self.manager.get_task("u1", TaskType.LOGIN)
+        task.streak_days = 5
+        task.last_completed_date = date.today() - timedelta(days=2)
+        task.reset_date = date.today() - timedelta(days=1)
+        self.manager._save()
+
+        task2 = self.manager.get_task("u1", TaskType.LOGIN)
+        self.assertEqual(task2.streak_days, 0)
+
+        self.manager.login("u1")
+        task3 = self.manager.get_task("u1", TaskType.LOGIN)
+        self.assertEqual(task3.streak_days, 1)
+
+    def test_force_reset_does_not_break_streak(self):
+        self.manager.login("u1")
+        task = self.manager.get_task("u1", TaskType.LOGIN)
+        task.streak_days = 3
+        task.last_completed_date = date.today() - timedelta(days=1)
+        self.manager._save()
+
+        self.manager.force_reset_all()
+
+        task = self.manager.get_task("u1", TaskType.LOGIN)
+        self.assertEqual(task.streak_days, 3)
+
+    def test_streak_reward_progression(self):
+        self.manager.login("u1")
+        task = self.manager.get_task("u1", TaskType.LOGIN)
+        self.assertEqual(task.streak_days, 1)
+
+        reward_day1 = self.manager.get_current_reward("u1", TaskType.LOGIN)
+        self.assertEqual(reward_day1, "100金币")
+
+        task.streak_days = 3
+        reward_day3 = self.manager.get_current_reward("u1", TaskType.LOGIN)
+        self.assertEqual(reward_day3, "300金币")
+
+        task.streak_days = 7
+        reward_day7 = self.manager.get_current_reward("u1", TaskType.LOGIN)
+        self.assertEqual(reward_day7, "800金币 + 稀有道具")
+
+        task.streak_days = 15
+        reward_day15 = self.manager.get_current_reward("u1", TaskType.LOGIN)
+        self.assertEqual(reward_day15, "800金币 + 稀有道具")
+
+
+class TestStreakTimezone(unittest.TestCase):
+    def test_streak_uses_user_timezone(self):
+        task = DailyTask(
+            user_id="u1",
+            task_type=TaskType.LOGIN,
+            timezone="Asia/Shanghai",
+        )
+        sh_today = get_today_in_tz("Asia/Shanghai")
+
+        task.streak_days = 1
+        task.last_completed_date = sh_today - timedelta(days=1)
+        task.update_progress(1)
+        self.assertEqual(task.streak_days, 2)
+        self.assertEqual(task.last_completed_date, sh_today)
+
+    def test_streak_broken_respects_timezone(self):
+        task = DailyTask(
+            user_id="u1",
+            task_type=TaskType.LOGIN,
+            timezone="America/New_York",
+        )
+        ny_today = get_today_in_tz("America/New_York")
+
+        task.streak_days = 3
+        task.last_completed_date = ny_today - timedelta(days=2)
+        task.reset_date = ny_today - timedelta(days=1)
+
+        task._reset_streak_if_broken()
+        self.assertEqual(task.streak_days, 0)
+
+    def test_streak_cross_timezone_boundary(self):
+        task_cn = DailyTask(
+            user_id="cn",
+            task_type=TaskType.LOGIN,
+            timezone="Asia/Shanghai",
+        )
+        task_us = DailyTask(
+            user_id="us",
+            task_type=TaskType.LOGIN,
+            timezone="America/New_York",
+        )
+
+        cn_today = get_today_in_tz("Asia/Shanghai")
+        us_today = get_today_in_tz("America/New_York")
+
+        task_cn.streak_days = 1
+        task_cn.last_completed_date = cn_today - timedelta(days=1)
+        task_us.streak_days = 1
+        task_us.last_completed_date = us_today - timedelta(days=1)
+
+        task_cn.update_progress(1)
+        task_us.update_progress(1)
+
+        self.assertEqual(task_cn.streak_days, 2)
+        self.assertEqual(task_us.streak_days, 2)
 
 
 if __name__ == "__main__":

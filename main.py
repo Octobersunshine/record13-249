@@ -2,7 +2,7 @@ import os
 import time
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, date, timedelta
 from zoneinfo import ZoneInfo
 
 from models import TaskType
@@ -39,12 +39,14 @@ def print_user_tasks(task_manager: TaskManager, user_id: str, user_name: str = N
     for task_type, task in tasks.items():
         config = configs.get(task_type)
         tname = config.name if config else task_type.value
-        reward = config.reward if config else "-"
+        streak = task.streak_days
+        reward = task.get_current_reward(config) if config else "-"
         status = "✅已完成" if task.completed else "⏳进行中"
         claimed = "🎁已领取" if task.claimed else "📦未领取"
+        streak_str = f"🔥连续{streak}天" if streak > 0 else "  未连续"
         print(
             f"[{tname}] 进度: {task.progress}/{task.target} "
-            f"| {status} | {claimed} | 奖励: {reward}"
+            f"| {status} | {claimed} | {streak_str} | 奖励: {reward}"
         )
     print("=" * 70 + "\n")
 
@@ -95,6 +97,31 @@ def main() -> None:
         task_manager.kill_monsters(user["id"], 50)
         task_manager.recharge(user["id"])
         print_user_tasks(task_manager, user["id"], user["name"])
+
+    print("\n--- 演示连续任务奖励递增 ---")
+    cn_id = "user_cn"
+    task = task_manager.get_task(cn_id, TaskType.LOGIN)
+    task.streak_days = 3
+    task.last_completed_date = date.today() - timedelta(days=1)
+    task_manager._save()
+    configs = task_manager.get_task_configs()
+    config = configs[TaskType.LOGIN]
+    print(f"  连续登录 3 天，当前奖励: {task.get_current_reward(config)}")
+
+    task.streak_days = 7
+    print(f"  连续登录 7 天，当前奖励: {task.get_current_reward(config)}")
+
+    task.streak_days = 15
+    print(f"  连续登录 15 天（已达上限），当前奖励: {task.get_current_reward(config)}")
+
+    task.streak_days = 1
+    print(f"  连续登录 1 天（基础奖励），当前奖励: {task.get_current_reward(config)}")
+
+    print("\n--- 领取连续任务奖励 ---")
+    success, reward = task_manager.claim_reward(cn_id, TaskType.LOGIN)
+    print(f"  领取登录奖励: {'成功' if success else '失败'} - {reward}")
+
+    print_user_tasks(task_manager, cn_id, "中国玩家")
 
     print("\n--- 当前时区分组 ---")
     groups = task_manager.get_all_timezone_groups()

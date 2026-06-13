@@ -2,15 +2,33 @@ import json
 import os
 import threading
 from datetime import date, datetime, timezone
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
-from models import DailyTask, TaskType, TaskConfig, validate_timezone, get_today_in_tz
+from models import DailyTask, TaskType, TaskConfig, validate_timezone, get_today_in_tz, DEFAULT_REWARD_TIERS
 
 
 DEFAULT_TASK_CONFIGS: List[TaskConfig] = [
-    TaskConfig(task_type=TaskType.LOGIN, name="每日登录", target=1, reward="100金币"),
-    TaskConfig(task_type=TaskType.KILL, name="击杀怪物", target=50, reward="500经验"),
-    TaskConfig(task_type=TaskType.RECHARGE, name="每日充值", target=1, reward="VIP经验x10"),
+    TaskConfig(
+        task_type=TaskType.LOGIN,
+        name="每日登录",
+        target=1,
+        reward="100金币",
+        reward_tiers=DEFAULT_REWARD_TIERS[TaskType.LOGIN],
+    ),
+    TaskConfig(
+        task_type=TaskType.KILL,
+        name="击杀怪物",
+        target=50,
+        reward="500经验",
+        reward_tiers=DEFAULT_REWARD_TIERS[TaskType.KILL],
+    ),
+    TaskConfig(
+        task_type=TaskType.RECHARGE,
+        name="每日充值",
+        target=1,
+        reward="VIP经验x10",
+        reward_tiers=DEFAULT_REWARD_TIERS[TaskType.RECHARGE],
+    ),
 ]
 
 
@@ -147,13 +165,36 @@ class TaskManager:
                 self._save()
             return task
 
-    def claim_reward(self, user_id: str, task_type: TaskType) -> bool:
+    def claim_reward(self, user_id: str, task_type: TaskType) -> Tuple[bool, str]:
         with self._lock:
             task = self.get_task(user_id, task_type)
             if task and task.claim_reward():
+                config = self._task_configs[task_type]
+                reward = task.get_current_reward(config)
                 self._save()
-                return True
-            return False
+                return True, reward
+            return False, ""
+
+    def get_streak_days(self, user_id: str, task_type: TaskType) -> int:
+        with self._lock:
+            task = self.get_task(user_id, task_type)
+            return task.streak_days if task else 0
+
+    def get_current_reward(self, user_id: str, task_type: TaskType) -> str:
+        with self._lock:
+            task = self.get_task(user_id, task_type)
+            if not task:
+                return ""
+            config = self._task_configs[task_type]
+            return task.get_current_reward(config)
+
+    def reset_streak(self, user_id: str, task_type: TaskType) -> None:
+        with self._lock:
+            task = self.get_task(user_id, task_type)
+            if task:
+                task.streak_days = 0
+                task.last_completed_date = None
+                self._save()
 
     def reset_user_tasks(self, user_id: str) -> None:
         with self._lock:
