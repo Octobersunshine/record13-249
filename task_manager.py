@@ -1,9 +1,10 @@
 import json
 import os
 import threading
-from datetime import date
-from typing import Dict, List, Optional
-from models import DailyTask, TaskType, TaskConfig
+from datetime import date, datetime, timezone
+from typing import Dict, List, Optional, Set
+from zoneinfo import ZoneInfo
+from models import DailyTask, TaskType, TaskConfig, validate_timezone, get_today_in_tz
 
 
 DEFAULT_TASK_CONFIGS: List[TaskConfig] = [
@@ -21,6 +22,7 @@ class TaskManager:
         self._task_configs: Dict[TaskType, TaskConfig] = {
             tc.task_type: tc for tc in DEFAULT_TASK_CONFIGS
         }
+        self._user_timezones: Dict[str, str] = {}
         self._load()
 
     def _get_storage_key(self, user_id: str, task_type: TaskType) -> str:
@@ -39,6 +41,8 @@ class TaskManager:
                 if user_id not in self._tasks:
                     self._tasks[user_id] = {}
                 self._tasks[user_id][task_type] = task
+                tz = data.get("timezone", "UTC")
+                self._user_timezones[user_id] = tz
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             print(f"加载任务数据失败: {e}")
 
@@ -56,12 +60,51 @@ class TaskManager:
             self._tasks[user_id] = {}
         if task_type not in self._tasks[user_id]:
             config = self._task_configs[task_type]
+            tz = self._user_timezones.get(user_id, "UTC")
             self._tasks[user_id][task_type] = DailyTask(
                 user_id=user_id,
                 task_type=task_type,
                 target=config.target,
+                timezone=tz,
             )
         return self._tasks[user_id][task_type]
+
+    def _sync_timezone_to_tasks(self, user_id: str) -> None:
+        tz = self._user_timezones.get(user_id, "UTC")
+        if user_id in self._tasks:
+            for task in self._tasks[user_id].values():
+                if task.timezone != tz:
+                    task.timezone = tz
+
+    def set_user_timezone(self, user_id: str, tz_name: str) -> bool:
+        if not validate_timezone(tz_name):
+            return False
+        with self._lock:
+            self._user_timezones[user_id] = tz_name
+            self._sync_timezone_to_tasks(user_id)
+            self._save()
+            return True
+
+    def get_user_timezone(self, user_id: str) -> str:
+        return self._user_timezones.get(user_id, "UTC")
+
+    def get_users_in_timezone(self, tz_name: str) -> List[str]:
+        with self._lock:
+            return [
+                uid for uid, tz in self._user_timezones.items()
+                if tz == tz_name
+            ]
+
+    def get_all_user_timezones(self) -> Dict[str, str]:
+        with self._lock:
+            return dict(self._user_timezones)
+
+    def get_all_timezone_groups(self) -> Dict[str, List[str]]:
+        with self._lock:
+            groups: Dict[str, List[str]] = {}
+            for uid, tz in self._user_timezones.items():
+                groups.setdefault(tz, []).append(uid)
+            return groups
 
     def update_task_progress(self, user_id: str, task_type: TaskType, amount: int = 1) -> Optional[DailyTask]:
         with self._lock:
@@ -128,6 +171,19 @@ class TaskManager:
                         task.reset()
                         count += 1
             self._save()
+            return count
+
+    def reset_tasks_for_timezone(self, tz_name: str) -> int:
+        with self._lock:
+            count = 0
+            for user_id in self.get_users_in_timezone(tz_name):
+                if user_id in self._tasks:
+                    for task in self._tasks[user_id].values():
+                        if task.needs_reset():
+                            task.reset()
+                            count += 1
+            if count > 0:
+                self._save()
             return count
 
     def force_reset_all(self) -> int:

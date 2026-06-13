@@ -1,35 +1,59 @@
+import os
 import time
 import signal
 import sys
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from models import TaskType
 from task_manager import TaskManager
 from reset_scheduler import DailyResetScheduler
 
 
+USERS = [
+    {"id": "user_cn", "name": "中国玩家", "tz": "Asia/Shanghai"},
+    {"id": "user_us", "name": "美国玩家", "tz": "America/New_York"},
+    {"id": "user_uk", "name": "英国玩家", "tz": "Europe/London"},
+    {"id": "user_jp", "name": "日本玩家", "tz": "Asia/Tokyo"},
+]
+
+
 def on_reset_complete(reset_count: int) -> None:
     print(f"[回调] 每日重置完成，共处理 {reset_count} 个任务")
 
 
-def print_user_tasks(task_manager: TaskManager, user_id: str) -> None:
-    print(f"\n===== 用户 {user_id} 的每日任务 =====")
+def print_current_times() -> None:
+    print("\n----- 当前各时区时间 -----")
+    for user in USERS:
+        now = datetime.now(ZoneInfo(user["tz"]))
+        print(f"  {user['tz']:20s} | {user['name']:8s} | {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("--------------------------\n")
+
+
+def print_user_tasks(task_manager: TaskManager, user_id: str, user_name: str = None) -> None:
+    name = user_name or user_id
+    tz = task_manager.get_user_timezone(user_id)
+    print(f"\n===== 用户 {name} ({user_id}) [时区: {tz}] 的每日任务 =====")
     configs = task_manager.get_task_configs()
     tasks = task_manager.get_user_tasks(user_id)
     for task_type, task in tasks.items():
         config = configs.get(task_type)
-        name = config.name if config else task_type.value
+        tname = config.name if config else task_type.value
         reward = config.reward if config else "-"
         status = "✅已完成" if task.completed else "⏳进行中"
         claimed = "🎁已领取" if task.claimed else "📦未领取"
         print(
-            f"[{name}] 进度: {task.progress}/{task.target} "
+            f"[{tname}] 进度: {task.progress}/{task.target} "
             f"| {status} | {claimed} | 奖励: {reward}"
         )
-    print("=====================================\n")
+    print("=" * 70 + "\n")
 
 
 def main() -> None:
     data_file = "tasks_data.json"
+    if os.path.exists(data_file):
+        os.remove(data_file)
+
     task_manager = TaskManager(data_file=data_file)
 
     scheduler = DailyResetScheduler(
@@ -37,6 +61,7 @@ def main() -> None:
         reset_hour=0,
         reset_minute=0,
         on_reset_callback=on_reset_complete,
+        check_interval=60,
     )
 
     def handle_shutdown(signum, frame):
@@ -50,42 +75,48 @@ def main() -> None:
 
     scheduler.start()
 
-    print("=" * 50)
-    print("每日任务系统已启动")
+    print("=" * 70)
+    print("每日任务系统已启动（时区感知模式）")
     print("支持任务类型: 登录(LOGIN)、击杀(KILL)、充值(RECHARGE)")
-    print("调度服务: 每日凌晨 00:00 自动重置")
-    print("=" * 50)
+    print("调度服务: 各时区本地时间 00:00 自动重置")
+    print("=" * 70)
 
-    demo_user = "user_1001"
+    print_current_times()
 
-    print(f"\n--- 模拟用户 {demo_user} 登录 ---")
-    task_manager.login(demo_user)
-    print_user_tasks(task_manager, demo_user)
+    print("--- 为各用户设置时区 ---")
+    for user in USERS:
+        ok = task_manager.set_user_timezone(user["id"], user["tz"])
+        print(f"  用户 {user['name']}({user['id']}) 设置时区 {user['tz']}: {'成功' if ok else '失败'}")
 
-    print(f"--- 模拟用户 {demo_user} 击杀 30 只怪物 ---")
-    task_manager.kill_monsters(demo_user, 30)
-    print_user_tasks(task_manager, demo_user)
+    print("\n--- 模拟各用户完成任务 ---")
+    for user in USERS:
+        print(f"\n[玩家 {user['name']}] 登录并击杀怪物...")
+        task_manager.login(user["id"])
+        task_manager.kill_monsters(user["id"], 50)
+        task_manager.recharge(user["id"])
+        print_user_tasks(task_manager, user["id"], user["name"])
 
-    print(f"--- 模拟用户 {demo_user} 再击杀 25 只怪物 ---")
-    task_manager.kill_monsters(demo_user, 25)
-    print_user_tasks(task_manager, demo_user)
+    print("\n--- 当前时区分组 ---")
+    groups = task_manager.get_all_timezone_groups()
+    for tz, users in groups.items():
+        user_list = ", ".join(users)
+        print(f"  {tz}: {user_list}")
 
-    print(f"--- 模拟用户 {demo_user} 领取击杀任务奖励 ---")
-    success = task_manager.claim_reward(demo_user, TaskType.KILL)
-    print(f"领取结果: {'成功' if success else '失败'}")
-    print_user_tasks(task_manager, demo_user)
+    print("\n--- 测试: 按时区手动重置 ---")
+    for user in USERS:
+        print(f"\n按 Enter 键手动重置时区 {user['tz']} 的任务...")
+        input()
+        count = scheduler.trigger_timezone_reset(user["tz"])
+        print(f"时区 {user['tz']} 重置了 {count} 个任务")
+        print_user_tasks(task_manager, user["id"], user["name"])
 
-    print(f"--- 模拟用户 {demo_user} 充值 ---")
-    task_manager.recharge(demo_user)
-    print_user_tasks(task_manager, demo_user)
+    print("\n--- 模拟各用户再次完成任务，等待自动重置 ---")
+    for user in USERS:
+        task_manager.login(user["id"])
+        task_manager.kill_monsters(user["id"], 30)
 
-    print("\n--- 测试: 手动触发重置 ---")
-    input("按 Enter 键手动触发一次任务重置...")
-    reset_count = scheduler.trigger_manual_reset()
-    print(f"重置了 {reset_count} 个任务")
-    print_user_tasks(task_manager, demo_user)
-
-    print("\n调度服务将继续运行，等待每日凌晨自动重置...")
+    print_current_times()
+    print("调度服务将继续运行，等待各时区本地 00:00 自动重置...")
     print("按 Ctrl+C 退出服务")
 
     try:
